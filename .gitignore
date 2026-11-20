@@ -1,0 +1,9 @@
+# downloaded by scripts/fetch_third_party.py, not redistributed
+third_party/
+
+# scratch files written by the scripts
+__pycache__/
+bench/_*.cfg
+tests/poc_run_case.txt
+tests/poc_run_output.txt
+tests/hmac_cases.txt

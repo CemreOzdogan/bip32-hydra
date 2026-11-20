@@ -1,0 +1,11 @@
+Default bit length: 127
+Default security parameter: 40
+Compiling file Programs/my_Programs/poc_derive.mpc
+Changed bit length for comparisons etc. to 129
+Writing to /mp-spdz/Programs/Schedules/poc_derive.sch
+Writing to /mp-spdz/Programs/Bytecode/poc_derive-0.bc
+Program requires:
+         768 integer bits
+       10120 integer triples
+          24 integer squares
+         208 virtual machine rounds

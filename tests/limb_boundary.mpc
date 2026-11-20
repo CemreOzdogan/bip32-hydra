@@ -1,0 +1,46 @@
+##################################################################################
+# limb_boundary.mpc -- runs poc_derive.mpc's OWN limb routine (child_scalar,
+# ge_const, overflow_bit_and_limb_bits, low128_bits) on chosen (I_L, k_par)
+# pairs. Added 2026-11-18 (paper-v3 Appendix C boundary tests).
+#
+# The functions are not retyped: the block of poc_derive.mpc from
+# "N_SECP = " up to "def one_attempt" is read and exec'd verbatim, after the
+# same program settings poc_derive.mpc uses. I_L enters as PRF words
+# (c0, c1, 0, 0) and goes through the overflow routine, exactly as an attempt
+# does; k_par's bits come from low128_bits as in poc_derive.mpc.
+#
+# TEST ONLY: it opens the candidate child limbs.
+# Compile-time argument: path of the cases file (default
+# /repo/tests/limb_boundary_cases.txt), lines "name I_L k_par".
+##################################################################################
+from Compiler import program, comparison, floatingpoint
+from Compiler.types import *
+from Compiler.library import print_ln
+import builtins
+
+p = program.prime
+assert p == 2**128 + 385
+program.set_bit_length(p.bit_length())
+program.use_square(True)
+program.name = "limb_boundary"
+
+SRC = "Programs/my_Programs/poc_derive.mpc"
+with builtins.open(SRC) as _f:
+    _src = _f.read()
+_a = _src.index("N_SECP = ")
+_b = _src.index("def one_attempt")
+exec(compile(_src[_a:_b], SRC, "exec"))
+
+args = list(program.args)
+cases_path = args[1] if len(args) > 1 else "/repo/tests/limb_boundary_cases.txt"
+CASES = [l.split() for l in builtins.open(cases_path) if l.strip()]
+
+for name, il, kp in CASES:
+    il, kp = int(il), int(kp)
+    words = [sint(il >> 128), sint(il & MASK128), sint(0), sint(0)]
+    ovf, b0, b1 = overflow_bit_and_limb_bits(words)
+    kpar = sint(kp & MASK128), sint(kp >> 128)
+    kp_bits = low128_bits(kpar[0]) + low128_bits(kpar[1])
+    kc_hi, kc_lo, masked = child_scalar(b0, b1, kp_bits)
+    print_ln("LIMB " + name + " %s %s %s %s", ovf.reveal(), masked == 0,
+             kc_hi.reveal(), kc_lo.reveal())

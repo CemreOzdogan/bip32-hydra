@@ -1,0 +1,50 @@
+{
+  "_comment": "Frozen parameters of the construction, transcribed from ao-prf_wProofs.tex. This is the intended single source of truth. See README.md 'Constants are duplicated, not shared' for the caveat: bip32-hydra.mpc currently carries its own copies in a different representation, and wiring it to this file would require modifying it (out of scope). test_constants.py checks all three copies agree.",
+
+  "prime": "340282366920938463463374607431768211841",
+  "prime_expr": "2^128 + 385",
+  "prime_source": "tex sec.1.1 (Choice of Prime)",
+
+  "kappa": 128,
+  "d": 3,
+  "d_source": "tex sec.1 table: smallest odd integer with gcd(d, p-1) = 1",
+
+  "R_E1": 2,
+  "R_E2": 4,
+  "R_I": 42,
+  "R_H": 39,
+  "rounds_source": "tex sec.1 table; R_E = 6 = 2 initial + 4 final",
+
+  "M_E": [[3, 2, 1, 1], [1, 3, 2, 1], [1, 1, 3, 2], [2, 1, 1, 3]],
+  "M_I": [[2, 1, 1, 1], [2, 2, 1, 1], [2, 1, 3, 1], [3, 1, 1, 8]],
+  "M_J": [
+    [5, 1, 1, 1, 1, 1, 1, 1],
+    [6, 2, 1, 1, 1, 1, 1, 1],
+    [4, 1, 6, 1, 1, 1, 1, 1],
+    [9, 1, 1, 9, 1, 1, 1, 1],
+    [3, 1, 1, 1, 4, 1, 1, 1],
+    [8, 1, 1, 1, 1, 7, 1, 1],
+    [7, 1, 1, 1, 1, 1, 8, 1],
+    [2, 1, 1, 1, 1, 1, 1, 5]
+  ],
+  "matrices_source": "tex sec.1.2, given in plain form (actual entries)",
+
+  "round_constants": null,
+  "round_constants_note": "NOT SPECIFIED IN THE TEX. Derived via SHAKE128 seeded with 'Hydra' || label || the prime as little-endian 64-bit blocks, with labels 'Constants' (body then head) and 'Rolling'. Procedure taken from the Hydra authors' hydra.sage; see README 'Spec gaps'.",
+
+  "domain_tag_string": "BIP32-HYDRA-hd",
+  "delta_0": "2036494695060765632617527158786370",
+  "delta_0_derivation": "int.from_bytes(b'BIP32-HYDRA-hd', 'little')",
+  "delta_1": "0",
+  "delta_2": "0",
+  "deltas_source": "tex sec.4.3",
+
+  "secp256k1_order_n": "115792089237316195423570985008687907852837564279074904382605163141518161494337",
+  "secp256k1_order_hex": "0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141",
+  "n_hi": "0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFE",
+  "n_lo": "0xBAAEDCE6AF48A03BBFD25E8CD0364141",
+  "n_source": "tex sec.8.2",
+
+  "overflow_band_size": 385,
+  "overflow_band_note": "p - 2^128; a word is rejected iff its canonical value lies in [2^128, p). tex sec.7"
+}

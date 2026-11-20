@@ -1,0 +1,252 @@
+##################################################################################
+# poc_derive.mpc -- PROOF OF CONCEPT: the full hardened Derive of
+# ao-prf_wProofs.tex, executed on secret shares, with BIP32's ADDITIVE child
+# rule:   k_child = (I_L + k_par) mod n,   c_child = I_R.
+# (Restored 2026-11-02; the 2026-10-05 "option (b)" k_child = I_L is archived
+# as poc_vectors_v2_optionb.json.)
+#
+# bip32-hydra.mpc is NOT modified. Its definitions are read and exec'd
+# verbatim (same technique as harness.mpc), so the Hydra PRF, KeyEnc and InEnc
+# used here are literally bip32-hydra.mpc's own code. Its
+# program.set_bit_length(129) is also kept exactly as it is.
+#
+# Per level -- tex Algorithm 1 + sec.7 + sec.8:
+#   1. K = KeyEnc(k_hi, k_lo, c_hi, c_lo)                    [bip32-hydra.mpc]
+#   2. m = (ctr, delta_0, delta_1, delta_2), deltas via InEnc [bip32-hydra.mpc]
+#   3. (c0,c1,c2,c3) = E_K(m) on shares                      [bip32-hydra.mpc]
+#   4. sec.7 overflow test ON SHARES: bit 128 of an exact bit decomposition
+#      of each c_j; open ONLY the OR of the four bits.
+#   5. sec.8 ON SHARES: S = I_L + k_par by a 257-bit binary adder,
+#      k_child = S - [S >= n]*n (limb-level conditional subtraction),
+#      bad = [I_L >= n] OR [k_child == 0]; open ONLY that one bit.
+#   6. if either opened bit is 1: ctr <- ctr + 1, retry (runtime loop).
+#   7. accept: k_child = (k_hi', k_lo'), c_child = I_R = (c2,c3). The next
+#      level's PRF key is KeyEnc(k_hi', k_lo', c2, c3).
+#
+# Nothing secret is opened by steps 1-7 except the two verdict bits the tex
+# specifies. The per-level PRF words and child limbs ARE revealed at the end
+# of each level, but only as a TEST OUTPUT HOOK so the run can be compared
+# with oracle.py; a deployment would keep them shared.
+#
+# USAGE (compile-time arguments):
+#   ./compile.py -P <p> Programs/my_Programs/poc_derive.mpc \
+#       k_hi k_lo c_hi c_lo force_ovf force_bad edabit idx_1 [idx_2 ...]
+#
+#   force_ovf, force_bad : TEST HOOK. Attempt a (0-based) is treated as an
+#       overflow rejection if a < force_ovf, and -- if its real overflow test
+#       passed -- as a sec.8 rejection if force_ovf <= a < force_ovf+force_bad.
+#       The real branches have probability ~2^-116 / ~2^-128 and cannot be hit
+#       by sampling; this makes the retry path actually execute. 0 0 = off.
+#       force_ovf = straight compiles ONE straight-line attempt, no retry loop,
+#       so the compiler can report finite triple/bit counts (cost accounting).
+#   edabit : 1 enables program.use_edabit(True), 0 leaves MP-SPDZ's default.
+##################################################################################
+
+from Compiler import program, comparison, floatingpoint
+from Compiler.types import *
+from Compiler.library import print_ln, do_while, if_, start_timer, stop_timer
+import builtins
+
+SOURCE = "Programs/my_Programs/bip32-hydra.mpc"
+CUT_MARKER = "# default: single 4-word (512-bit) block"
+with builtins.open(SOURCE) as _f:
+    _src = _f.read()
+exec(compile(_src[:_src.index(CUT_MARKER)], SOURCE, "exec"))
+# Hydra, KeyEnc, InEnc, THESIS_PRIME ... now defined, verbatim.
+
+args = list(program.args)
+if len(args) < 9:
+    print("usage: poc_derive.mpc k_hi k_lo c_hi c_lo force_ovf force_bad "
+          "edabit idx_1 [idx_2 ...]")
+    exit()
+k_hi, k_lo, c_hi, c_lo = (int(a) for a in args[1:5])
+# "straight" (not -1: compile.py would parse a leading '-' as an option)
+STRAIGHT_LINE = args[5] == "straight"
+FORCE_OVF = 0 if STRAIGHT_LINE else int(args[5])
+FORCE_BAD = int(args[6])
+USE_EDABIT = bool(int(args[7]))
+PATH = [int(a) for a in args[8:]]
+
+p = program.prime
+assert p == THESIS_PRIME, "poc_derive.mpc is written for p = 2^128 + 385"
+# Unchanged from bip32-hydra.mpc. Nothing below depends on it being lowered:
+# BitDecFull reads the prime directly, BitLTL sizes itself from its input,
+# and the clear equality test on opened values checks 64-bit chunks up to
+# this length -- at 129 that covers every bit of a field element.
+program.set_bit_length(p.bit_length())
+program.use_square(True)
+if USE_EDABIT:
+    program.use_edabit(True)
+program.name = "poc_derive"
+
+hydra = Hydra(p, 128, 4, True)
+
+N_SECP = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141
+assert N_SECP.bit_length() == 256
+MASK128 = (1 << 128) - 1
+N_HI, N_LO = N_SECP >> 128, N_SECP & MASK128
+
+
+def random_mask():
+    """A uniformly random secret field element (first leg of a triple)."""
+    a, _, _ = sint.get_random_triple()
+    return a
+
+
+def low128_bits(x):
+    """Exact bits of a secret x < 2^128, LSB first."""
+    return floatingpoint.BitDecFull(x)[:128]
+
+
+def overflow_bit_and_limb_bits(words):
+    """tex sec.7 on shares. c_j < p < 2^129, so c_j >= 2^128 iff bit 128 of
+    its exact decomposition is set. Returns (OR of the four overflow bits, as
+    a secret 0/1), and the low 128 bits of c0 and c1, LSB first."""
+    tops, low = [], []
+    for j in range(4):
+        bits = floatingpoint.BitDecFull(words[j])   # all 129 bits, exact
+        tops.append(bits[128])
+        low.append(bits[:128])
+    none_overflow = 1 - tops[0]
+    for t in tops[1:]:
+        none_overflow = none_overflow * (1 - t)
+    return 1 - none_overflow, low[0], low[1]
+
+
+def ge_const(bits, c):
+    """Secret bit [x >= c] for x given by its bits (LSB first), c a public
+    constant >= 1 of at most len(bits) bits. BitLTL's wrapper wants the public
+    operand as a clear REGISTER, which cannot hold a 256-bit constant
+    (registers are field elements < p), so decompose c-1 at compile time and
+    call the raw circuit directly: [x >= c] = [(c-1) < x]."""
+    return sint.conv(comparison.BitLTL_raw(
+        floatingpoint.bits(c - 1, len(bits)), bits))
+
+
+def child_scalar(bits_c0, bits_c1, kp_bits):
+    """tex sec.8 on shares, BIP32's additive rule.
+    I_L = c0*2^128 + c1, so its bits LSB-first are bits(c1) then bits(c0);
+    kp_bits are k_par's bits in the same order.
+
+      S        = I_L + k_par           257-bit binary adder (S < 2n < 2^257)
+      ge       = [S >= n]
+      k_child  = S - ge*n              in limbs, with a borrow from lo to hi
+      bad      = [I_L >= n] OR [k_child == 0]
+
+    Returns (k_child_hi, k_child_lo, masked) where masked is OPENED, 0 iff
+    bad, and otherwise a uniformly random nonzero field element -- i.e. it
+    leaks exactly the one bit."""
+    il_bits = bits_c1 + bits_c0
+    ge_il = ge_const(il_bits, N_SECP)                     # [I_L >= n]
+
+    # Log-round carry-lookahead adder on two secret 256-bit vectors; returns
+    # 257 bits, the last being the carry. (sint.bit_adder is not usable here:
+    # at this width it picks a carry-select adder that rejects 0 padding.)
+    s = floatingpoint.BitAdd(il_bits, kp_bits)
+    s = [sint.conv(b) for b in s]
+    assert len(s) == 257
+    ge = ge_const(s, N_SECP)                              # [S >= n]
+
+    # Conditional subtraction in 128-bit limbs. True limb results lie in
+    # [0, 2^128) < p, so plain field arithmetic gives them exactly.
+    s_lo = sum(s[i] * 2**i for i in range(128))
+    s_hi = sum(s[128 + i] * 2**i for i in range(129))
+    lo_ge = ge_const(s[:128], N_LO)                       # [S_lo >= n_lo]
+    borrow = ge * (1 - lo_ge)
+    kc_lo = s_lo - ge * N_LO + borrow * 2**128
+    kc_hi = s_hi - ge * N_HI - borrow
+
+    # k_child == 0  iff  S == 0 or S == n (S < 2n). Both are linear in the
+    # bits: popcount(S) and the Hamming distance from n, each in [0, 257].
+    pop = sum(s)
+    n_bits = floatingpoint.bits(N_SECP, 257)
+    dist = sum((1 - s[i]) if n_bits[i] else s[i] for i in range(257))
+    nonzero = pop * dist                                  # 0 iff k_child == 0
+
+    w = (1 - ge_il) * nonzero                             # 0 iff bad
+    return kc_hi, kc_lo, (w * random_mask()).reveal()
+
+
+def one_attempt(K, deltas, ctr):
+    words = hydra.E_K(4, K, list(deltas), ctr)
+    ovf, b0, b1 = overflow_bit_and_limb_bits(words)
+    return words, ovf, b0, b1
+
+
+K = KeyEnc(sint(k_hi), sint(k_lo), sint(c_hi), sint(c_lo))
+
+for level, index in enumerate(PATH):
+    e0, d0, d1, d2 = InEnc(index)          # bip32-hydra.mpc's own InEnc
+    # k_par's bits are the same for every retry of this level.
+    if STRAIGHT_LINE:
+        start_timer(4)
+    kp_bits = low128_bits(K[1]) + low128_bits(K[0])
+    if STRAIGHT_LINE:
+        stop_timer(4)
+
+    if STRAIGHT_LINE:
+        # Cost accounting: one attempt, no loop, both verdicts opened.
+        # Timers (benchmarking): 1 = PRF E_K, 2 = sec.7 overflow test,
+        # 3 = sec.8 add mod n + verdict (k_par decomposition is timer 4).
+        start_timer(1)
+        words = hydra.E_K(4, K, [d0, d1, d2], e0)
+        stop_timer(1)
+        start_timer(2)
+        ovf, b0, b1 = overflow_bit_and_limb_bits(words)
+        ovf_open = ovf.reveal()
+        stop_timer(2)
+        start_timer(3)
+        kc_hi, kc_lo, masked = child_scalar(b0, b1, kp_bits)
+        stop_timer(3)
+        print_ln("POC_STRAIGHT %s ovf=%s bad=%s", level, ovf_open, masked == 0)
+        for i in range(4):
+            print_ln("POC_WORD %s %s %s", level, i, words[i].reveal())
+        print_ln("POC_KCHILD %s %s %s", level, kc_hi.reveal(), kc_lo.reveal())
+        continue
+
+    ctr = MemValue(regint(e0))
+    attempt = MemValue(regint(0))
+    done = MemValue(regint(0))
+    out = sint.Array(4)          # accepted PRF words (test output only)
+    kc = sint.Array(2)           # accepted k_child limbs (hi, lo)
+
+    @do_while
+    def _():
+        a = attempt.read()
+        words, ovf, b0, b1 = one_attempt(K, (d0, d1, d2), ctr.read())
+        ovf_open = regint.conv(ovf.reveal())            # opens ONLY the OR bit
+        forced_ovf = a < FORCE_OVF                       # TEST HOOK
+
+        @if_((ovf_open + forced_ovf) == 0)
+        def _():
+            kc_hi, kc_lo, masked = child_scalar(b0, b1, kp_bits)  # opens ONLY [bad]
+            bad = masked == 0
+            forced_bad = (a < FORCE_OVF + FORCE_BAD) - (a < FORCE_OVF)
+
+            @if_((bad + forced_bad) == 0)
+            def _():
+                for i in range(4):
+                    out[i] = words[i]
+                kc[0] = kc_hi
+                kc[1] = kc_lo
+                done.write(1)
+
+        @if_(done.read() == 0)
+        def _():
+            ctr.write(ctr.read() + 1)                    # BIP32-style skip
+        attempt.write(attempt.read() + 1)
+        return done.read() == 0
+
+    # TEST OUTPUT HOOK: reveal the accepted child for comparison with oracle.py
+    print_ln("POC_LEVEL %s INDEX %s CTR %s ATTEMPTS %s",
+             level, index, ctr.read(), attempt.read())
+    for i in range(4):
+        print_ln("POC_WORD %s %s %s", level, i, out[i].reveal())
+    print_ln("POC_KCHILD %s %s %s", level, kc[0].reveal(), kc[1].reveal())
+
+    # child (k_child, c_child = I_R) is the next level's parent
+    child_K = KeyEnc(kc[0], kc[1], out[2], out[3])
+    for i in range(4):
+        K[i] = child_K[i]
+
+print_ln("POC_END")

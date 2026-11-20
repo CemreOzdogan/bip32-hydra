@@ -1,0 +1,11 @@
+prog,quantity,value
+hydra,compile seconds,3.27
+hydra,compile peak KB,119196
+hydra,integer bits,768
+hydra,integer triples,10120
+hydra,integer squares,24
+hydra,virtual machine rounds,208
+hmac,compile seconds,18.45
+hmac,compile peak KB,994248
+hmac,bit triples,234348
+hmac,virtual machine rounds,45376

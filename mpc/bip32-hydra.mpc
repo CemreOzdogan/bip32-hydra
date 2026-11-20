@@ -1,0 +1,974 @@
+from math import ceil, log, gcd, floor
+from Cryptodome.Hash import SHAKE128
+
+from Compiler.library import else_, for_range_parallel, get_player_id, if_e, print_ln, start_timer, stop_timer
+from Compiler import program
+from Compiler.types import *
+
+##################################################################################
+# bip32-hydra.mpc -- the Hydra PRF on shares, and the key and input encodings
+# of the derivation (paper Section 2.2, Section 4.2 and Appendix A), adapted
+# from the Hydra designers' hydra.mpc (repository krypto/hydra, commit ff1957ef).
+#
+# PURPOSE. The paper replaces BIP32's HMAC-SHA512 with Hydra, used directly as a
+# PRF, so that a threshold wallet can run hardened derivation on secret shares,
+# which HMAC-SHA512 makes prohibitively expensive in MPC. This file contains the
+# PRF E_K and everything it is built from, plus the encodings KeyEnc and InEnc
+# (paper Section 4.2). The derivation around them (overflow test on shares,
+# k_child = (I_L + k_par) mod n, validity test, retries) is in poc_derive.mpc,
+# which executes this file's definitions unchanged.
+#
+# WHAT CHANGED FROM hydra.mpc:
+#   1. Prime: p = 2^128 + 385 (paper Appendix A.1), not the designers' own
+#      benchmark prime. d, R_E, R_I, R_H all re-derive correctly from
+#      hydra.mpc's own formulas at this prime (independently re-confirmed
+#      against the designers' calc_round_numbers.sage, run in SageMath). M_I
+#      and M_J are hardcoded below in hydra.mpc's optimized ("-1 on column 0
+#      and the diagonal") internal form, converted from the plain matrices of
+#      paper Appendix A.2 -- the auto-search path hydra.mpc falls back to for
+#      other primes will NOT reproduce these specific small-integer matrices.
+#   2. Naming follows the paper (and, through it, the Hydra paper) instead of
+#      hydra.mpc's own variable names -- in particular, hydra.mpc flattens
+#      every head-related name to "h" (Rh, Mh, non_linear_h, permutation_h),
+#      but the papers distinguish the head PERMUTATION H_{K'} (H-named,
+#      matching the round count R_H) from its round-function/matrix/
+#      nonlinear-layer, which are J-named (M_J, S_J, script-J_i) -- this file
+#      preserves that distinction rather than collapsing it. See the table
+#      below for the full renaming.
+#   3. Protocols: the compiled bytecode is protocol-agnostic. It was run under
+#      semi-honest Shamir (shamir-party.x -N 5 -T 2), malicious Shamir
+#      (malicious-shamir-party.x -N 5 -T 2) and MASCOT (mascot-party.x -N 2)
+#      with identical outputs; hydra.mpc's own benchmarks used 2-party MASCOT.
+#      T is a corruption threshold, not an availability threshold: MP-SPDZ
+#      needs all N parties in every run (with N = 5 and only 3 parties started,
+#      the run does not complete), and its Shamir protocols require 2*T < N.
+#   4. Explicit Beaver multiplications (beaver_mul) with optional tracing (see
+#      VERBOSE_LIMIT/VERBOSE_ALL below), for demonstrating how the MPC actually
+#      happens -- off by default. Verified to produce identical, correct
+#      results under both MASCOT and Shamir backends.
+#
+# NOTE. The stand-alone demo at the end of this file (main) opens the PRF output
+# and serializes each word LITTLE-endian, the convention of an earlier draft.
+# The paper (Section 4.3) and poc_derive.mpc use big-endian. program.name is
+# "thesisHydra", the name of this file during development.
+#
+# RENAMING TABLE (hydra.mpc -> this file, matching the paper):
+#   Re_1, Re_2, Ri, Rh          -> R_E1, R_E2, R_I, R_H   (R_E = R_E1+R_E2)
+#   Me, Mi, Mh                 -> M_E, M_I, M_J
+#   non_linear_e, _i, _h, _r    -> S_E, S_I, S_J, S_R
+#   matrix_e                   -> matrix_E
+#   matrix_i (generic helper)  -> sparse_matrix_mul (used for both M_I, M_J)
+#   permutation_b, permutation_h -> permutation_B, permutation_H
+#   rc_b, rc_h, rc_r           -> rc_B, rc_H, rc_R
+#   gen_ks                     -> E_K   (the paper's E_K(m), generalized to
+#                                        t output words; t=4 is exactly the
+#                                        single-block 512-bit PRF of paper
+#                                        Appendix A.8)
+#   R, R_plain (rolling)        -> unchanged; already matches the Hydra paper
+#
+# RUNNING the stand-alone demo (semi-honest Shamir, N = 5, T = 2):
+#   ./compile.py -P 340282366920938463463374607431768211841 \
+#       Programs/my_Programs/bip32-hydra.mpc 4 1
+#   ./shamir-party.x -N 5 -T 2 -p 0 thesisHydra   (x5, one per party 0..4)
+##################################################################################
+
+# Turn on to watch the Beaver protocol for the first VERBOSE_LIMIT occurrence(s)
+# of each of the 5 distinct multiplication sites (0 = off, matches hydra.mpc's
+# normal fast behaviour exactly). VERBOSE_ALL=True prints every occurrence.
+VERBOSE_LIMIT = 0
+VERBOSE_ALL = False
+
+_beaver_call_counts = {}
+
+def beaver_mul(x, y, label):
+    """ Manually unrolled Beaver-triple multiplication, replacing a bare
+    x*y so the protocol steps are visible instead of one opaque compiled
+    instruction. Mathematically identical to what x*y itself compiles to
+    (see Compiler/instructions.py's muls.expand()); this is purely an
+    observability aid, gated by VERBOSE_LIMIT/VERBOSE_ALL, and is silent
+    (zero extra output) by default. """
+    count = _beaver_call_counts.get(label, 0)
+    _beaver_call_counts[label] = count + 1
+    verbose = VERBOSE_ALL or (VERBOSE_LIMIT and count < VERBOSE_LIMIT)
+
+    a, b, ab = sint.get_random_triple()
+
+    if verbose:
+        print_ln("")
+        print_ln("player %s ===== beaver_mul: %s  (occurrence #%s) =====", get_player_id(), label, count)
+        print_ln("player %s [%s] operand  x = %s", get_player_id(), label, x.reveal())
+        print_ln("player %s [%s] operand  y = %s", get_player_id(), label, y.reveal())
+        print_ln("player %s [%s] triple   a = %s", get_player_id(), label, a.reveal())
+        print_ln("player %s [%s] triple   b = %s", get_player_id(), label, b.reveal())
+        print_ln("player %s [%s] triple  ab = a*b = %s", get_player_id(), label, ab.reveal())
+
+    e = (x - a).reveal()
+    f = (y - b).reveal()
+
+    if verbose:
+        print_ln("player %s [%s] both parties now hold, identically:", get_player_id(), label)
+        print_ln("player %s [%s]   e = x - a (opened) = %s", get_player_id(), label, e)
+        print_ln("player %s [%s]   f = y - b (opened) = %s", get_player_id(), label, f)
+
+    z = ab + e * b + f * a + e * f
+
+    if verbose:
+        print_ln("player %s [%s] result z = ab + e*b + f*a + e*f = %s", get_player_id(), label, z.reveal())
+        print_ln("player %s ===== end %s =====", get_player_id(), label)
+        print_ln("")
+
+    return z
+
+##################################################################################
+# Constants for p = 2^128 + 385 = 340282366920938463463374607431768211841,
+# converted from the plain matrices in ao-prf_wProofs.tex sec. 1.2 into
+# hydra.mpc's optimized internal form (subtract 1 from the column-0 and
+# diagonal entries; every other position is implicitly 1 -- see gen_matrix
+# below for why that's a safe, lossless conversion).
+PREC_M_I = [
+    [1, 1, 1, 1],
+    [1, 1, 1, 1],
+    [1, 1, 2, 1],
+    [2, 1, 1, 7]
+]
+
+PREC_M_J = [
+    [4, 1, 1, 1, 1, 1, 1, 1],
+    [5, 1, 1, 1, 1, 1, 1, 1],
+    [3, 1, 5, 1, 1, 1, 1, 1],
+    [8, 1, 1, 8, 1, 1, 1, 1],
+    [2, 1, 1, 1, 3, 1, 1, 1],
+    [7, 1, 1, 1, 1, 6, 1, 1],
+    [6, 1, 1, 1, 1, 1, 7, 1],
+    [1, 1, 1, 1, 1, 1, 1, 4]
+]
+
+THESIS_PRIME = 340282366920938463463374607431768211841
+
+##################################################################################
+
+class Hydra:
+    def __init__(self, p, kappa, t, use_squares):
+        self.use_squares = use_squares
+        self.p = p
+        self.kappa = kappa
+        self.perms = Hydra.num_perms(t)
+        self.d = Hydra.get_d(p)
+        self.R_E1, self.R_E2, self.R_I, self.R_H = Hydra.get_rounds(p, kappa, self.d)
+
+        self.M_E = self.gen_circ_matrix([3, 2, 1, 1])
+        if p == THESIS_PRIME:
+            self.M_I = PREC_M_I
+            self.M_J = PREC_M_J
+        else:
+            # no checks implemented, use sage script to generate!
+            shake = Hydra.init_shake(p, "Matrices")
+            self.M_I = self.gen_M_I(shake)
+            self.M_J = self.gen_M_J(shake)
+
+        # from here, just random values (without zero)
+        shake = Hydra.init_shake(p, "Constants")
+        self.rc_B = self.gen_rc(self.R_E1 + self.R_E2 + self.R_I, 4, shake)
+        self.rc_H = self.gen_rc(self.R_H, 8, shake)
+
+        # from here, random constants for the heads
+        shake = Hydra.init_shake(p, "Rolling")
+        self.rc_R = self.gen_rc(self.perms - 1, 8, shake)
+
+    def print_depth(self):
+        R_E = self.R_E1 + self.R_E2
+
+        pe_mul = 0
+        pe_depth = 0
+        pe_squares = 0
+
+        if self.d == 3:
+            if self.use_squares:
+                pe_squares = R_E * 4
+                pe_mul = R_E * 4
+                pe_depth = R_E + 1
+            else:
+                pe_depth = R_E * 2
+                pe_mul = (R_E * 4) * 2
+        elif self.d == 5:
+            if self.use_squares:
+                pe_squares = (R_E * 4) * 2
+                pe_depth = R_E * 3
+                pe_mul = R_E * 4
+            else:
+                pe_depth = R_E * 3
+                pe_mul = (R_E * 4) * 3
+        else:
+            assert(False)
+
+        lm_head_mul_depth = 1
+        lm_inner_mul_depth = 2
+
+        squares = pe_squares
+        mul = pe_mul + self.R_I * lm_inner_mul_depth + self.R_H * lm_head_mul_depth * self.perms
+        depth = pe_depth + self.R_I * lm_inner_mul_depth + self.R_H * lm_head_mul_depth
+
+        mul = mul + 2 * (self.perms - 1) # rolling mul
+        depth = depth + self.perms - 1 # non-parallel rolling
+
+        print_ln("Expected:")
+        print_ln("  %s inverses", 0)
+        print_ln("  %s squares", squares)
+        print_ln("  %s muls", mul)
+        print_ln("  %s depth", depth  + 1) # reveal included
+
+    @staticmethod
+    def get_R_H_star(kappa):
+        assert(kappa >= 80)
+        assert(kappa <= 256)
+        R_star = [
+            19, 19, 19, 19, 20, 20, 20, 20, 20, 21, 21, 21, 21, 21, 22, 22, 23,
+            23, 23, 23, 23, 23, 24, 24, 24, 24, 24, 25, 25, 25, 25, 25, 25, 26,
+            26, 26, 26, 26, 27, 27, 27, 27, 27, 27, 28, 28, 29, 29, 29, 29, 29,
+            30, 30, 30, 30, 30, 30, 31, 31, 31, 31, 31, 32, 32, 32, 32, 32, 32,
+            33, 33, 33, 33, 33, 34, 34, 34, 34, 34, 34, 35, 35, 36, 36, 36, 36,
+            36, 37, 37, 37, 37, 37, 37, 38, 38, 38, 38, 38, 39, 39, 39, 39, 39,
+            39, 40, 40, 40, 40, 40, 41, 41, 41, 41, 41, 41, 42, 42, 42, 42, 42,
+            43, 43, 44, 44, 44, 44, 44, 44, 45, 45, 45, 45, 45, 46, 46, 46, 46,
+            46, 46, 47, 47, 47, 47, 47, 48, 48, 48, 48, 48, 48, 49, 49, 49, 49,
+            49, 50, 50, 50, 50, 50, 50, 51, 51, 52, 52, 52, 52, 52, 53, 53, 53,
+            53, 53, 53, 54, 54, 54, 54
+        ]
+        return R_star[kappa - 80]
+
+    @staticmethod
+    def get_round_num_H(p, kappa):
+        R_H_star = Hydra.get_R_H_star(kappa)
+
+        x0 = kappa / 24 + log(12, 2)
+        x1 = (kappa - log(p, 2)) / 22 + log(11, 2)
+        R_hat = 3 + ceil(max(x0, x1))
+        R = ceil(1.25 * ceil(max(24, R_hat, R_H_star + 2)))
+        return R
+
+    @staticmethod
+    def get_round_num_I(p, kappa, d):
+        x0 = kappa / float(16)
+        x1 = (kappa - log(p, 2)) / float(12)
+        R_hat = 4 - floor(log(d, 2)) + ceil(max(x0, x1))
+        R = ceil(1.125 * ceil(max(kappa/4 - log(d, 2) + 6, R_hat)))
+        return R
+
+    @staticmethod
+    def get_rounds(p, kappa, d):
+        R_E1 = 2
+        R_E2 = 4
+        R_I = Hydra.get_round_num_I(p, kappa, d)
+        R_H = Hydra.get_round_num_H(p, kappa)
+        return R_E1, R_E2, R_I, R_H
+
+    @staticmethod
+    def init_shake(p, string):
+        bitlen = p.bit_length()
+        num = ceil(bitlen / 64)
+
+        shake = SHAKE128.new()
+        shake.update('Hydra'.encode('ascii'))
+        shake.update(string.encode('ascii'))
+        for i in range(num):
+            prime_block = (p >> (i * 64)) & ((0x1 << 64) - 1)
+            shake.update(int(prime_block).to_bytes(8, byteorder = 'little'))
+        return shake
+
+    def field_element_from_shake(self, shake):
+        bitlen = self.p.bit_length()
+        byte = ceil(bitlen / 8)
+        word = ceil(byte / 8)
+
+        while True:
+            word_buf = [0] * word
+            buf = shake.read(byte)
+            for i in range(word):
+                byte_array = [0] * 8
+                for j in range(i * 8, min((i + 1) * 8, byte)):
+                    byte_array[j - i * 8] = buf[j];
+                word_buf[i] = int.from_bytes(byte_array, byteorder = 'little')
+            res = 0
+            for el in reversed(word_buf):
+                res = (res << 64) + el
+            if res < self.p:
+                return res
+
+    def field_element_from_shake_without_0(self, shake):
+        while True:
+            el = self.field_element_from_shake(shake)
+            if el != 0:
+                return el
+
+    def check_conditions(self, lambdas, matrix, size):
+        # No subspace checks!
+        sum_ = 0
+        for j in range(size):
+            inner = 0
+            for l in range(size):
+                inner = inner + matrix[j][l]
+                if j == 0 or j == l:
+                    inner = inner + 1 # account for -1 when creating the matrices for efficient implementation
+            sum_ = (sum_ + lambdas[j] * inner) % self.p
+
+        if sum_ == 0:
+            return False
+
+        for j in range(size):
+            sum_ = 0
+            for l in range(size):
+                el = matrix[l][j]
+                if l == 0 or j == l:
+                    el = el + 1 # account for -1 when creating the matrices for efficient implementation
+                sum_ = (sum_ + lambdas[l] * el) % self.p
+            if sum_ == 0:
+                return False
+
+        return True
+
+    def gen_matrix(self, shake, size):
+        # just a random one without subspace trail check!
+        M = [[1]*size for _ in range(size)]
+        M[0][0] = (self.field_element_from_shake_without_0(shake) - 1) % self.p
+        for i in range(1, size):
+            M[i][0] = (self.field_element_from_shake_without_0(shake) - 1) % self.p
+            M[i][i] = (self.field_element_from_shake_without_0(shake) - 1) % self.p
+        return M
+
+    def gen_M_I(self, shake):
+        # No supspace check!
+        lambda1 = [1, self.p - 1, 1, self.p - 1]
+        lambda2 = [1, 1, self.p - 1, self.p - 1]
+        while True:
+            M = self.gen_matrix(shake, 4)
+            if self.check_conditions(lambda1, M, 4) and self.check_conditions(lambda2, M, 4):
+                return M
+
+    def gen_M_J(self, shake):
+        # No supspace check!
+        lambdas = [1, 1, 1, 1, self.p - 1, self.p - 1, self.p - 1, self.p - 1]
+        while True:
+            M = self.gen_matrix(shake, 8)
+            if self.check_conditions(lambdas, M, 8):
+                return M
+
+    @staticmethod
+    def gen_circ_matrix(row):
+        rot = row.copy()
+        M = []
+        M.append(rot)
+        for i in range(1, len(row)):
+            rot = rot[-1:] + rot[:-1]
+            M.append(rot)
+        return M
+
+    def gen_rc(self, R, t, shake):
+        round_constants = []
+        for _ in range(R):
+            rc = []
+            for i in range(t):
+               rc.append(self.field_element_from_shake(shake))
+            round_constants.append(rc)
+        return round_constants
+
+    @staticmethod
+    def get_d(p):
+        for d in range(3, p):
+            if gcd(d, p - 1) == 1:
+                break
+        return d
+
+    def S_E_plain(self, state):
+        for i in range(len(state)):
+            state[i] = pow(state[i], self.d, self.p)
+        return state
+
+    @staticmethod
+    def lai_massey_dots(state):
+        assert(len(state) == 4)
+        tmp = state[0] - state[3]
+        dot1 = tmp - state[1] + state[2]
+        dot2 = tmp + state[1] - state[2]
+
+        return dot1, dot2
+
+    def S_I_plain(self, state):
+        dot1, dot2 = self.lai_massey_dots(state)
+
+        dot1 = (dot1 * dot1) % self.p
+        sum_ = (dot1 + dot2) % self.p
+        prod = (sum_ * sum_) % self.p
+
+        for i in range(len(state)):
+            state[i] = (state[i] + prod) % self.p
+        return state
+
+    def S_J_plain(self, state):
+        assert(len(state) == 8)
+        dot = state[0] + state[1] + state[2] + state[3] \
+            - state[4] - state[5] - state[6] - state[7]
+        dot = (dot * dot) % self.p
+
+        out = [(s + dot) % self.p for s in state]
+        return out
+
+    def S_R_plain(self, y, z):
+        vy, wy = self.lai_massey_dots(y)
+        wz, vz = self.lai_massey_dots(z)
+
+        v = (vy * vz) % self.p
+        w = (wy * wz) % self.p
+
+        y = [(yi + v) % self.p for yi in y]
+        z = [(zi + w) % self.p for zi in z]
+
+        return y, z
+
+    def R_plain(self, state, i):
+        if i == 0:
+            return state
+
+        y = state[:4]
+        z = state[4:]
+
+        y, z = self.S_R_plain(y, z)
+        y_perm = self.sparse_matrix_mul_plain(self.M_I, y)
+        z_perm = self.sparse_matrix_mul_plain(self.M_I, z)
+
+        state = self.vec_add_plain(self.concat(y_perm, z_perm), self.rc_R[i - 1])
+        return state
+
+    @staticmethod
+    def concat(a, b):
+        c = a.copy()
+        c.extend(b)
+        return c
+
+    def matrix_E_plain(self, state):
+        # multiplication by circ(3 2 1 1) is equal to state + state + rot(state) + sum(state)
+        sum_ = 0
+        for s in state:
+            sum_ = (sum_ + s) % self.p
+        state_rot = state[1:] + state[:1]
+
+        out = []
+        for i in range(len(state)):
+            out.append((sum_ + state_rot[i] + state[i] + state[i]) % self.p)
+        return out
+
+    def sparse_matrix_mul_plain(self, mat, state):
+        # Generic helper for both M_I and M_J: every entry outside column 0
+        # and the diagonal is implicitly 1 (see gen_matrix), so the product
+        # collapses to a handful of adds and scalar mults instead of an
+        # O(t^2) matrix-vector product.
+        t = len(state)
+        sum_ = sum(s for s in state) % self.p
+        out = [sum_] * t
+        out[0] = (out[0] + state[0] * mat[0][0]) % self.p
+        for i in range(1, t):
+            out[i] = (out[i] + state[0] * mat[i][0]) % self.p
+            tmp = (state[i] * mat[i][i]) % self.p
+            out[i] = (out[i] + tmp) % self.p
+        return out
+
+    def permutation_B_plain(self, state):
+        sum_ = [0] * 4
+
+        state = self.matrix_E_plain(state)
+        for i in range(self.R_E1):
+            state = self.S_E_plain(state)
+            state = self.matrix_E_plain(state)
+            state = self.vec_add_plain(state, self.rc_B[i])
+            sum_ = self.vec_add_plain(sum_, state)
+        for i in range(self.R_I):
+            state = self.S_I_plain(state)
+            state = self.sparse_matrix_mul_plain(self.M_I, state)
+            state = self.vec_add_plain(state, self.rc_B[i + self.R_E1])
+            sum_ = self.vec_add_plain(sum_, state)
+        for i in range(self.R_E1, self.R_E1 + self.R_E2):
+            state = self.S_E_plain(state)
+            state = self.matrix_E_plain(state)
+            state = self.vec_add_plain(state, self.rc_B[i + self.R_I])
+            if i < self.R_E1 + self.R_E2 - 1:
+                sum_ = self.vec_add_plain(sum_, state)
+        return state, sum_
+
+    def permutation_H_plain(self, state, K):
+        for r in range(self.R_H):
+            state = self.S_J_plain(state)
+            state = self.sparse_matrix_mul_plain(self.M_J, state)
+            state = self.vec_add_plain(state, self.rc_H[r])
+            state = self.vec_add_plain(state, K)
+        return state
+
+    def vec_add(self, vec1, vec2):
+        out = sint.Array(len(vec1))
+        for i in range(len(vec1)):
+            out[i] = vec1[i] + vec2[i]
+        return out
+
+    @staticmethod
+    def num_perms(t):
+        t_ = t // 8
+        t__ = t % 8
+
+        perms = t_
+        if t__ > 0:
+            perms = perms + 1
+        return perms
+
+    def compute_cube(self, x):
+        if self.use_squares:
+            r, rsq = sint.get_random_square()
+            r_cube = beaver_mul(r, rsq, "S_E.r_times_rsq")
+            y = (x - r).reveal()
+            return 3 * y * rsq + 3 * y ** 2 * r + y ** 3 + r_cube
+        else:
+            x2 = beaver_mul(x, x, "S_E.x_squared")
+            return beaver_mul(x2, x, "S_E.x_cubed")
+
+    def sbox(self, x):
+        if self.d == 3:
+            return self.compute_cube(x)
+        else:
+            return x ** self.d
+
+    def S_E(self, state):
+        for i in range(len(state)):
+            state[i] = self.sbox(state[i])
+        return state
+
+    def S_I(self, state):
+        dot1, dot2 = self.lai_massey_dots(state)
+
+        dot1 = beaver_mul(dot1, dot1, "S_I.dot1_squared")
+        sum_ = dot1 + dot2
+        prod = beaver_mul(sum_, sum_, "S_I.sum_squared")
+
+        out = sint.Array(len(state))
+        for i in range(len(state)):
+            out[i] = state[i] + prod
+        return out
+
+    def S_J(self, state):
+        assert(len(state) == 8)
+        dot = state[0] + state[1] + state[2] + state[3] \
+            - state[4] - state[5] - state[6] - state[7]
+        dot = beaver_mul(dot, dot, "S_J.dot_squared")
+
+        out = sint.Array(len(state))
+        for i in range(len(state)):
+            out[i] = state[i] + dot
+        return out
+
+    def S_R(self, y, z):
+        vy, wy = self.lai_massey_dots(y)
+        wz, vz = self.lai_massey_dots(z)
+
+        v = beaver_mul(vy, vz, "S_R.v")
+        w = beaver_mul(wy, wz, "S_R.w")
+
+        y = [yi + v for yi in y]
+        z = [zi + w for zi in z]
+
+        return y, z
+
+    def R(self, state, i):
+        if i == 0:
+            return state
+
+        y = state[:4]
+        z = state[4:]
+
+        y, z = self.S_R(y, z)
+        y_perm = self.sparse_matrix_mul(self.M_I, y)
+        z_perm = self.sparse_matrix_mul(self.M_I, z)
+
+        state = self.vec_add(self.concat_sint(y_perm, z_perm), self.rc_R[i - 1])
+        return state
+
+    @staticmethod
+    def concat_sint(a, b):
+        out = sint.Array(len(a) + len(b))
+        out[:len(a)] = a
+        out[len(a):] = b
+        return out
+
+    def sparse_matrix_mul(self, mat, state):
+        t = len(state)
+        sum_ = sum(s for s in state)
+
+        out = sint.Array(t)
+        out[0] = sum_ + state[0] * mat[0][0]
+        for i in range(1, t):
+            out[i] = sum_ + state[0] * mat[i][0]
+            tmp = state[i] * mat[i][i]
+            out[i] = out[i] + tmp
+        return out
+
+    def matrix_E(self, state):
+        # multiplication by circ(3 2 1 1) is equal to state + state + rot(state) + sum(state)
+        sum_ = 0
+        for s in state:
+            sum_ = sum_ + s
+        state_rot = sint.Array(len(state))
+        state_rot[:-1] = state[1:]
+        state_rot[-1:] = state[:1]
+
+        out = sint.Array(len(state))
+        for i in range(len(state)):
+           out[i] = sum_ + state_rot[i] + state[i] + state[i]
+        return out
+
+    def permutation_B(self, state):
+        sum_ = [0] * 4
+
+        state = self.matrix_E(state)
+        for i in range(self.R_E1):
+            state = self.S_E(state)
+            state = self.matrix_E(state)
+            state = self.vec_add(state, self.rc_B[i])
+            sum_ = self.vec_add(state, sum_)
+        for i in range(self.R_I):
+            state = self.S_I(state)
+            state = self.sparse_matrix_mul(self.M_I, state)
+            state = self.vec_add(state, self.rc_B[i + self.R_E1])
+            sum_ = sum_ + state
+        for i in range(self.R_E1, self.R_E1 + self.R_E2):
+            state = self.S_E(state)
+            state = self.matrix_E(state)
+            state = self.vec_add(state, self.rc_B[i + self.R_I])
+            if i < self.R_E1 + self.R_E2 - 1:
+                sum_ = sum_ + state
+        return state, sum_
+
+    def permutation_H(self, state, K):
+        for r in range(self.R_H):
+            state = self.S_J(state)
+            state = self.sparse_matrix_mul(self.M_J, state)
+            state = self.vec_add(state, self.rc_H[r])
+            state = state + K
+        return state
+
+    def vec_add_plain(self, vec1, vec2):
+        for i in range(len(vec1)):
+            vec1[i] = (vec1[i] + vec2[i]) % self.p
+        return vec1
+
+    def E_K_plain(self, t, K, IV, N):
+        """ The Hydra PRF, cleartext reference. For t=4 this is exactly
+        E_K(m) of ao-prf_wProofs.tex sec. 3.4 (pre-whitening, body, head
+        input, head with feed-forward, truncation to a single 4-word
+        block -- 512 bits); larger t is Hydra's general extendable-output
+        construction (more heads via the rolling function). """
+        assert(len(IV) == 3)
+        assert(len(K) == 4)
+        state = Hydra.concat([N], IV)
+        assert(len(state) == 4)
+        perms = Hydra.num_perms(t)
+        assert(self.perms >= perms) # enough rc
+
+        # pre-whitening + body
+        state = self.vec_add_plain(state, K)
+        state, z = self.permutation_B_plain(state)
+        state = self.vec_add_plain(state, K)
+
+        # expanded key K' = K || M_E*K
+        K_mat = self.matrix_E_plain(K)
+        K_ = Hydra.concat(K, K_mat)
+
+        output = []
+        perm_counter = -1
+        roll = Hydra.concat(state, z)
+        perm = None
+        for i in range(t):
+            off = i % 8
+            if off == 0:
+                perm_counter = perm_counter + 1
+                roll = self.R_plain(roll, perm_counter)
+                perm = self.permutation_H_plain(roll, K_)
+                perm = self.vec_add_plain(perm, roll) # feed forward
+            output.append(perm[off])
+
+        return output
+
+    def E_K(self, t, K, IV, N):
+        """ The Hydra PRF on secret shares -- the function a future BIP32-
+        sibling derivation wrapper (ao-prf_wProofs.tex sec. 4+) calls
+        directly with K = KeyEnc(k, c) and [N||IV] = InEnc(index, ...). """
+        assert(len(IV) == 3)
+        assert(len(K) == 4)
+        state = Hydra.concat([N], IV)
+        assert(len(state) == 4)
+        perms = Hydra.num_perms(t)
+        assert(self.perms >= perms) # enough rc
+
+        # pre-whitening + body
+        state = self.vec_add(K, state)
+        state, z = self.permutation_B(state)
+        state = state + K
+
+        # expanded key K' = K || M_E*K
+        K_mat = self.matrix_E(K)
+        K_ = Hydra.concat_sint(K, K_mat)
+
+        rolls = []
+        roll = Hydra.concat_sint(state, z)
+        rolls.append(roll)
+        for i in range(1, perms):
+            rolls.append(self.R(rolls[i - 1], i))
+
+        perm = []
+        @for_range_parallel(perms, perms)
+        def _(i):
+            a = self.permutation_H(rolls[i], K_)
+            a = self.vec_add(a, rolls[i]) # feed forward
+            perm.append(a)
+
+        output = []
+        perm_counter = -1
+        for i in range(t):
+            off = i % 8
+            if off == 0:
+                perm_counter = perm_counter + 1
+            output.append(perm[perm_counter][off])
+        return output
+
+
+# tex sec.7 "Fixed-Width Serialization": p - 2^128, the width of the
+# overflow band [2^128, p). A revealed word's canonical value is >= 2^128
+# iff its signed display is in [-REJECT_BAND, -1] -- p's specific shape
+# (2^128 + 385) makes that the simplest correct test, no separate
+# canonicalization step needed.
+REJECT_BAND = 385
+
+def byte_reverse_128(c):
+    """ c is a revealed (public) field element known to represent a value
+    in [0, 2^128); returns the integer whose big-endian byte representation
+    equals c's 128-bit LITTLE-ENDIAN byte representation -- i.e. this is
+    the per-word serialization step of tex sec.7, done for real on the
+    revealed value (not yet "a comparison on secret shares", which the tex
+    notes is what a real deployment would want -- this file still reveals
+    output_shared before this point). % and >> act on the field element's
+    true residue regardless of its signed display convention, so this is
+    correct however MP-SPDZ chooses to print the input. """
+    rev = cint(0)
+    tmp = c
+    for _ in range(16):
+        byte = tmp % 256
+        tmp = tmp >> 8
+        rev = rev * 256 + byte
+    return rev
+
+# ── KeyEnc / InEnc (ao-prf_wProofs.tex sec. 4.3, "The Sibling Construction") ──
+#
+# WHY these exist at all, not just what they compute:
+#
+# Hydra's published PRF-security assumption is stated for a key drawn
+# UNIFORMLY from the full F_p^4. BIP32's own HMAC assignment -- chain code
+# in the MAC key slot, private key in the data slot -- would, ported
+# naively, leave some of Hydra's 4 key words as fixed public constants
+# (since only one 256-bit secret would land in the key). A key confined to
+# that kind of small subspace is simply not covered by "uniform key"
+# anymore -- invoking the published assumption on it would be invoking an
+# assumption nobody actually proved. Worse, Hydra's key schedule
+# (K' = K || M_E*K) is linear, so a structured key propagates that
+# structure into every single round -- precisely what algebraic
+# cryptanalysis (e.g. the Groebner-basis attacks in Part-VI-adjacent
+# discussion) is built to exploit. KeyEnc's entire job is to prevent this:
+# pack BOTH parent secrets into all 4 key words, so no word is ever a
+# constant and the full, published, uniform-key assumption applies as-is.
+#
+# InEnc exists for the mirror-image reason. PRF security is proven against
+# an adversary that queries at inputs OF ITS CHOOSING -- restricting or
+# fixing part of the input only weakens that adversary, so it costs
+# nothing to do. What InEnc actually has to guarantee is injectivity:
+# distinct hardened indices must produce distinct PRF inputs, or two
+# different "sibling" children could collide on the same call and come
+# out identical -- breaking sibling independence outright. The fixed
+# delta_0..delta_2 constants cost nothing security-wise and exist purely
+# for domain separation (a "nothing-up-my-sleeve" tag), so this exact
+# derivation can never collide with some unrelated use of the same Hydra
+# key under the same parameters.
+
+def KeyEnc(k_hi, k_lo, c_hi, c_lo):
+    """ k_hi/k_lo/c_hi/c_lo: sint -- the 128-bit-word halves of the parent
+    private key and chain code, in the limb form a threshold wallet would
+    already store them in. Returns K in F_p^4, ready for E_K. This is
+    local concatenation only -- no arithmetic, no Beaver triples, free
+    exactly as tex sec.4.3 ("both encodings are free") says it should be.
+    """
+    K = sint.Array(4)
+    K[0] = k_hi
+    K[1] = k_lo
+    K[2] = c_hi
+    K[3] = c_lo
+    return K
+
+# delta_0 = little-endian F_p-encoding of the 14-byte ASCII tag
+# "BIP32-HYDRA-hd" (tex sec.4.3) = int.from_bytes(b"BIP32-HYDRA-hd", "little"),
+# 111 bits, comfortably < 2**112 < p -- lossless. delta_1 = delta_2 = 0.
+BIP32_HYDRA_TAG = 2036494695060765632617527158786370
+
+def InEnc(index):
+    """ index: a public Python int, the hardened child index in
+    [2**31, 2**32). Returns (e, delta0, delta1, delta2) -- all 4 words
+    are PUBLIC, so InEnc is evaluated entirely in the clear (no sint
+    anywhere in this function). e packs "0x00 || ser32(index)": prepending
+    a zero byte to a big-endian number doesn't change its integer value,
+    so e is just `index` itself. """
+    assert 2**31 <= index < 2**32
+    e = index
+    delta0 = BIP32_HYDRA_TAG
+    delta1 = 0
+    delta2 = 0
+    return e, delta0, delta1, delta2
+
+def derive_demo(hydra, index, k_hi, k_lo, c_hi, c_lo):
+    """ One full Derive(k_par, c_par, index) call (tex sec.4.3):
+        Derive = E_{KeyEnc(k_par,c_par)}(InEnc(index))
+    wired up for real via KeyEnc/InEnc, through E_K, stopping at the
+    revealed I = I_L || I_R output. NOT included: the secp256k1
+    share-domain scalar reduction (tex sec.8) that turns I_L into an
+    actual child scalar via k_child = (I_L + k_par) mod n -- that's a
+    separate, later piece (different modulus, different arithmetic
+    entirely), not part of KeyEnc/InEnc. """
+    K = KeyEnc(k_hi, k_lo, c_hi, c_lo)
+    e, d0, d1, d2 = InEnc(index)
+    IV = [d0, d1, d2]
+
+    output_shared = hydra.E_K(4, K, IV, e)
+    output_revealed = reveal(output_shared)
+
+    print_ln("")
+    print_ln("Derive(k_par, c_par, index=%s) via KeyEnc/InEnc:", index)
+    for i in range(4):
+        print_ln("  word %s = %s", i, output_revealed[i])
+    return output_revealed
+
+def reveal(shared):
+    res = []
+    for s in shared:
+        c = s.reveal()
+        res.append(c)
+    return res
+
+def compare(a, b):
+    if len(a) != len(b):
+        return False
+    t = len(a)
+    correct = cint(0)
+    for i in range(t):
+        correct = correct + a[i] - b[i]
+
+    @if_e(correct == 0)
+    def _():
+        print_ln("Correct")
+    @else_
+    def _():
+        print_ln("A Error occured!?")
+
+def main(t, use_squares):
+    N = 2
+    MK = [0, 0, 0, 0]
+    IV = [1, 1, 1]
+
+    p = program.prime
+    l = p.bit_length()
+    program.set_bit_length(l)
+    print_ln("Prime %s with %s-bit", p, l)
+    print_ln("Computing E_K with %s output words (t=%s)", t, t)
+
+    hydra = Hydra(p, 128, t, use_squares)
+    hydra.print_depth()
+
+    output_plain = hydra.E_K_plain(t, MK, IV, N)
+
+    print_ln("Running MPC")
+    start_timer(1)
+    MK_ = sint.Array(4)
+    for i in range(4):
+        MK_[i] = sint(MK[i])
+    output_shared = hydra.E_K(t, MK_, IV, N)
+    output_revealed = reveal(output_shared)
+    stop_timer(1)
+    compare(output_plain, output_revealed)
+
+    print_ln("")
+    print_ln("E_K(m) result -- K=%s IV=%s N=%s -- %s words in F_p:", MK, IV, N, t)
+    for i in range(t):
+        print_ln("  word %s = %s", i, output_revealed[i])
+
+    if t == 4:
+        # BIP32-style serialization, tex sec.7: I = c0||c1||c2||c3 (each
+        # word 128-bit little-endian), I_L = c0||c1, I_R = c2||c3.
+        print_ln("")
+        print_ln("=== BIP32-style serialization (ao-prf_wProofs.tex sec.7) ===")
+        rejected = cint(0)
+        for i in range(4):
+            is_rejected = (output_revealed[i] < 0) * (output_revealed[i] >= -REJECT_BAND)
+            rejected = rejected + is_rejected
+
+        @if_e(rejected != 0)
+        def _():
+            print_ln("REJECTED: a word's canonical value is >= 2^128 -- per")
+            print_ln("tex sec.7, re-derive with an incremented index (this")
+            print_ln("mirrors BIP32's own I_L >= n rejection rule).")
+        @else_
+        def _():
+            r0 = byte_reverse_128(output_revealed[0])
+            r1 = byte_reverse_128(output_revealed[1])
+            r2 = byte_reverse_128(output_revealed[2])
+            r3 = byte_reverse_128(output_revealed[3])
+            print_ln("Accepted. Each value below is one 128-bit chunk of I,")
+            print_ln("in order -- zero-pad each to 32 hex characters and")
+            print_ln("concatenate to get I = I_L || I_R (256 bits each).")
+            print_ln("If a chunk prints NEGATIVE, that's MP-SPDZ's signed")
+            print_ln("display for a value > p/2 -- add p = %s", p)
+            print_ln("to it first to get the true chunk before hex-padding:")
+            print_ln("  I chunk 0 (I_L, first half)  = %s", r0)
+            print_ln("  I chunk 1 (I_L, second half) = %s", r1)
+            print_ln("  I chunk 2 (I_R, first half)  = %s", r2)
+            print_ln("  I chunk 3 (I_R, second half) = %s", r3)
+
+    if t == 4:
+        # KeyEnc/InEnc demo: a full Derive(k_par, c_par, index) call.
+        # Placeholder parent secrets (all zero) -- same role as MK above,
+        # not a real key. Index = 2**31 is BIP32's first hardened child,
+        # written 0' in BIP32 notation.
+        k_hi = sint(0); k_lo = sint(0)
+        c_hi = sint(0); c_lo = sint(0)
+        derive_demo(hydra, 2**31, k_hi, k_lo, c_hi, c_lo)
+
+    if VERBOSE_LIMIT or VERBOSE_ALL:
+        print_ln("")
+        print_ln("=== beaver_mul call counts (this compilation) ===")
+        for label in sorted(_beaver_call_counts.keys()):
+            count = _beaver_call_counts[label]
+            shown = count if VERBOSE_ALL else min(count, VERBOSE_LIMIT)
+            print_ln("  " + label + ": " + str(count) + " real Beaver multiplications (" + str(shown) + " shown in full)")
+
+# default: single 4-word (512-bit) block, matching ao-prf_wProofs.tex's
+# stated use as a direct BIP32-sibling PRF, with the masked-square trick
+# enabled (matches the tex's "depth 1" MPC-cost claim for S_E)
+t = 4
+use_squares = True
+
+args = len(program.args)
+if args > 1:
+    t = int(program.args[1])
+if args > 2:
+    use_squares = bool(int(program.args[2]))
+
+if program.prime == None:
+    print('Error: No prime provided')
+    exit()
+
+program.name = "thesisHydra"
+print("Compiling: for")
+print("Prime = " + str(program.prime))
+print("t = " + str(t))
+print("Using Squares = " + str(use_squares))
+print("VERBOSE_LIMIT = " + str(VERBOSE_LIMIT) + "  (VERBOSE_ALL = " + str(VERBOSE_ALL) + ")")
+program.use_square(use_squares)
+main(t, use_squares)

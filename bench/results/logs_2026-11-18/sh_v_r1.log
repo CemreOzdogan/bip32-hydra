@@ -1,0 +1,41 @@
+Starting timer 4 at 0 after 4.87e-06
+Stopped timer 4 at 0.0468655
+Starting timer 1 at 0 after 1.421e-06
+Warning generated 10000 squares
+Warning generated 10000 triples
+Stopped timer 1 at 0.0709069
+Starting timer 2 at 0 after 1.098e-06
+Stopped timer 2 at 0.0182526
+Starting timer 3 at 0 after 9.82e-07
+Stopped timer 3 at 0.0103541
+POC_STRAIGHT 0 ovf=0 bad=0
+POC_WORD 0 0 -116764648969744999858129657445779982995
+POC_WORD 0 1 68754728741391366747255478555737693737
+POC_WORD 0 2 127726815974115393357204575435708836607
+POC_WORD 0 3 8666961795308833292618789309729395871
+POC_KCHILD 0 -62519842145314761677915797228551429831 58108150782774844650158169190172524429
+POC_END
+Compiler: ./compile.py -P 340282366920938463463374607431768211841 Programs/my_Programs/poc_derive.mpc 54244806824430238180213860217228553163 329635788962321941366277298066203042148 268764408274067103925895012784404325451 191728111213012651673682265775223311943 straight 0 0 3377678972
+	9852 triples of Shamir gfp left
+	9976 squares of Shamir gfp left
+	9232 bits of Shamir gfp left
+Communication details (rounds in parallel threads counted double):
+Sending to all 0.007984 MB in 135 rounds, taking 0.0173908 seconds
+Sending/receiving 6.7175 MB in 216 rounds, taking 0.0532564 seconds
+CPU time = 0.0969709
+Time = 0.148808 seconds 
+Time1 = 0.0709069 seconds 
+Time2 = 0.0182526 seconds 
+Time3 = 0.0103541 seconds 
+Time4 = 0.0468655 seconds 
+Data sent = 6.74944 MB in ~351 rounds (party 0)
+Global data sent = 31.7154 MB (all parties)
+Actual cost of program:
+  Type int
+           148        Triples
+            24        Squares
+           768           Bits
+This program might benefit from some protocol options.
+Consider adding the following at the beginning of 'poc_derive.mpc':
+	program.use_edabit(True)
+Command line: ./shamir-party.x -N 5 -T 2 -v poc_derive -p 0

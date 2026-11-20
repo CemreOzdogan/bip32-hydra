@@ -1,0 +1,33 @@
+Prime 170141183460469231731687303715884105773 with 128-bit
+Having 8 plaintexts
+Expected:
+  0 inverses
+  24 squares
+  147 muls
+  131 depth
+Running MPC
+Starting timer 1 at 0 after 5.127e-06
+Warning generated 1000 triples
+Warning generated 1000 squares
+Warning generated 1000 triples
+Stopped timer 1 at 0.329229
+Correct
+Compiler: ./compile.py -P 170141183460469231731687303715884105773 Programs/my_Programs/hydra.mpc 8 1
+	853 triples of SPDZ gfp left
+	976 squares of SPDZ gfp left
+Communication details (rounds in parallel threads counted double):
+Broadcasting 0.000448 MB in 17 rounds, taking 0.00294738 seconds
+Exchanging one-to-one 45.1019 MB in 40 rounds, taking 1.70812 seconds
+Receiving directly 0.053216 MB in 134 rounds, taking 0.15199 seconds
+Sending directly 0.053216 MB in 134 rounds, taking 0.00449075 seconds
+Sending to all 1.6e-05 MB in 1 rounds, taking 0.33225 seconds
+CPU time = 0.326923
+Time = 0.333311 seconds 
+Time1 = 0.329229 seconds 
+Data sent = 45.1555 MB in ~326 rounds (party 0)
+Global data sent = 90.3111 MB (all parties)
+Actual cost of program:
+  Type int
+           147        Triples
+            24        Squares
+Command line: ./mascot-party.x -N 2 -v -p 0 hydra

@@ -1,0 +1,86 @@
+##################################################################################
+# harness.mpc -- differential-test driver for bip32-hydra.mpc.
+#
+# bip32-hydra.mpc is NOT modified and NOT copied. This file reads its source,
+# truncates it immediately before its own driver block, and execs the result,
+# so the Hydra class, KeyEnc and InEnc under test are literally
+# bip32-hydra.mpc's own code -- there is no possibility of copy drift between
+# the artifact and the thing being tested.
+#
+# All this file adds is (a) input plumbing, so inputs come from the command
+# line instead of being hardcoded, and (b) a machine-readable output hook.
+# No arithmetic of the construction is reimplemented here.
+#
+# USAGE
+#   ./compile.py -P <prime> Programs/my_Programs/harness.mpc prf  k0 k1 k2 k3 m0 m1 m2 m3
+#   ./compile.py -P <prime> Programs/my_Programs/harness.mpc derive  k_hi k_lo c_hi c_lo index
+# then run any party binary, e.g.
+#   ./shamir-party.x -N 5 -T 2 -p <i> harness
+##################################################################################
+
+from Compiler import program
+from Compiler.types import *
+from Compiler.library import print_ln
+
+SOURCE = "Programs/my_Programs/bip32-hydra.mpc"
+# bip32-hydra.mpc's own driver block begins with this line; everything before
+# it is definitions only.
+CUT_MARKER = "# default: single 4-word (512-bit) block"
+
+# NB: MP-SPDZ's compiler namespace shadows the builtin `open` with its
+# asm_open instruction, so the builtin must be reached explicitly.
+import builtins
+
+with builtins.open(SOURCE) as f:
+    _src = f.read()
+
+_idx = _src.index(CUT_MARKER)
+exec(compile(_src[:_idx], SOURCE, "exec"))
+# Hydra, KeyEnc, InEnc, reveal, THESIS_PRIME ... are now defined, verbatim.
+
+args = list(program.args)
+if len(args) < 2:
+    print("harness: need a mode ('prf' or 'derive')")
+    exit()
+
+mode = args[1]
+p = program.prime
+if p is None:
+    print("Error: No prime provided")
+    exit()
+
+program.set_bit_length(p.bit_length())
+program.name = "harness"
+use_squares = True
+program.use_square(use_squares)
+
+hydra = Hydra(p, 128, 4, use_squares)
+
+if mode == "prf":
+    # Raw PRF: K and m given directly as four field elements each.
+    vals = [int(a) for a in args[2:10]]
+    K = sint.Array(4)
+    for i in range(4):
+        K[i] = sint(vals[i])
+    m_words = vals[4:8]
+    # E_K takes (t, K, IV, N) with the input block laid out as [N] || IV.
+    out = hydra.E_K(4, K, m_words[1:4], m_words[0])
+    label = "PRF"
+elif mode == "derive":
+    # Full Derive: KeyEnc/InEnc are bip32-hydra.mpc's own, exercised for real.
+    k_hi, k_lo, c_hi, c_lo = [int(a) for a in args[2:6]]
+    index = int(args[6])
+    K = KeyEnc(sint(k_hi), sint(k_lo), sint(c_hi), sint(c_lo))
+    e, d0, d1, d2 = InEnc(index)
+    out = hydra.E_K(4, K, [d0, d1, d2], e)
+    label = "DERIVE"
+else:
+    print("harness: unknown mode " + mode)
+    exit()
+
+revealed = reveal(out)
+
+print_ln("HARNESS_MODE %s", label)
+for i in range(4):
+    print_ln("HARNESS_WORD %s %s", i, revealed[i])
+print_ln("HARNESS_END")

@@ -1,0 +1,4 @@
+bitdec_check (MP-SPDZ BitDecFull, p = 2^128+385, 129 bits)
+shamir     PASS: 460 decompositions (14 value groups), 0 wrong, 80 with bit 128 set; Time = 1.2336 seconds 
+malshamir  PASS: 460 decompositions (14 value groups), 0 wrong, 80 with bit 128 set; Time = 5.11631 seconds 
+mascot     PASS: 460 decompositions (14 value groups), 0 wrong, 80 with bit 128 set; Time = 146.722 seconds 

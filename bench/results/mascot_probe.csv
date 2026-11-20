@@ -1,0 +1,3 @@
+label,prog,N,T,rtt_ms,rate_mbit,rep,time_s,t1_s,t2_s,t3_s,t4_s,party0_MB,rounds,global_MB,cpu_avg_s,cpu_max_s,rss_max_KB
+hydra-mascot-N2,hydra,2,0,0,0,1,3.40047,0.258971,1.01748,0.999554,1.11555,442.759,660,885.518,3.395,3.410,201748
+hmac-mascot-N2,hmac,2,0,0,0,1,2.14778,1.07126,1.05281,0.0216336,NA,509.576,31374,1019.15,1.730,1.740,79388

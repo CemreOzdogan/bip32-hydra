@@ -1,0 +1,134 @@
+##################################################################################
+# hmac_derive.mpc -- BASELINE: standard BIP32 hardened child derivation with
+# HMAC-SHA512, executed on secret BINARY shares, for comparison with
+# poc_derive.mpc (Hydra). Same backend (shamir-party.x -N 5 -T 2).
+#
+#   I = HMAC-SHA512(key = c_par, data = 0x00 || ser256(k_par) || ser32(i))
+#   k_child = (I_L + k_par) mod n,  c_child = I_R,  bad = [I_L >= n] or [k_child = 0]
+#
+# SHA-512 is the Bristol Fashion compression circuit (Programs/Circuits/
+# sha512.txt, 57,947 AND gates), inputs/outputs as big-endian integers.
+# HMAC with a 32-byte key and a 37-byte message is exactly 4 compressions:
+#   per parent : S_i = f(IV, K0 ^ ipad),  S_o = f(IV, K0 ^ opad)    (2)
+#   per child  : inner = f(S_i, data || pad),  I = f(S_o, inner || pad)   (2)
+# The per-parent pair depends only on c_par, so a wallet computes it once per
+# parent and reuses it for every child; timer 1 measures it separately.
+#
+# Timers: 1 = per-parent pad states, 2 = per-child HMAC, 3 = add mod n + verdict.
+#
+# USAGE: compile.py hmac_derive.mpc k_par c_par index reveal
+#   reveal = 1 prints the child (test hook); 0 opens only the verdict bit.
+##################################################################################
+
+from circuit import Circuit
+from Compiler.GC.types import sbits, sbitvec
+from Compiler.library import print_ln, start_timer, stop_timer
+
+args = list(program.args)
+k_par, c_par, index, REVEAL = int(args[1]), int(args[2]), int(args[3]), int(args[4])
+assert 2**31 <= index < 2**32
+program.name = "hmac_derive"
+
+N_SECP = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141
+IV = [0x6a09e667f3bcc908, 0xbb67ae8584caa73b, 0x3c6ef372fe94f82b,
+      0xa54ff53a5f1d36f1, 0x510e527fade682d1, 0x9b05688c2b3e6c1f,
+      0x1f83d9abfb41bd6b, 0x5be0cd19137e2179]
+IV_INT = int.from_bytes(b"".join(w.to_bytes(8, "big") for w in IV), "big")
+
+sha = Circuit('sha512')
+sb1 = sbits.get_type(1)
+
+
+def secret_bits(value, n):
+    """n secret bits of value, LSB first (stand-in for stored key shares)."""
+    return sbitvec([sbits.get_type(n)(value)]).v
+
+
+def const_bits(value, n):
+    return [sb1((value >> i) & 1) for i in range(n)]
+
+
+def compress(state_bits, block_bits):
+    """One SHA-512 compression; all lists LSB first of big-endian integers."""
+    assert len(state_bits) == 512 and len(block_bits) == 1024
+    out = sha(sbitvec.from_vec(block_bits), sbitvec.from_vec(state_bits))
+    return out.v
+
+
+def xor_const(bits, c):
+    return [b ^ sb1((c >> i) & 1) if (c >> i) & 1 else b
+            for i, b in enumerate(bits)]
+
+
+def padded(msg_bits, total_len_bytes):
+    """msg_bits: LSB-first bits of a big-endian message of len(msg_bits)/8
+    bytes, forming the END of a hashed stream of total_len_bytes. Returns the
+    1024-bit block msg || 0x80 || 0.. || len128 (single final block)."""
+    m = len(msg_bits)
+    tail_len = 1024 - m
+    tail = (0x80 << (tail_len - 8)) | (8 * total_len_bytes)
+    return const_bits(tail, tail_len) + msg_bits     # LSB first: tail is low
+
+
+def add_bits(a, b):
+    """Ripple-carry addition, LSB first, len(a) == len(b); returns len+1 bits."""
+    out, carry = [], None
+    for x, y in zip(a, b):
+        t = x ^ y
+        if carry is None:
+            out.append(t)
+            carry = x & y
+        else:
+            out.append(t ^ carry)
+            carry = (x & y) ^ (carry & t)
+    return out + [carry]
+
+
+def ge_const(bits, c):
+    """Secret bit [x >= c] = carry-out of x + (2^k - c)."""
+    k = len(bits)
+    return add_bits(bits, const_bits(2**k - c, k))[k]
+
+
+def is_zero(bits):
+    acc = ~bits[0]
+    for b in bits[1:]:
+        acc = acc & ~b
+    return acc
+
+
+# Parent secrets (as a threshold wallet would hold them, in binary shares).
+k_bits = secret_bits(k_par, 256)
+c_bits = secret_bits(c_par, 256)
+iv_bits = const_bits(IV_INT, 512)
+
+# ---- per parent: K0 = c_par || 0^96 bytes; S_i, S_o ---------------------
+start_timer(1)
+K0 = const_bits(0, 768) + c_bits                      # key is the high bytes
+S_i = compress(iv_bits, xor_const(K0, int("36" * 128, 16)))
+S_o = compress(iv_bits, xor_const(K0, int("5c" * 128, 16)))
+stop_timer(1)
+
+# ---- per child: inner and outer hash -------------------------------------
+start_timer(2)
+data = const_bits(index, 32) + k_bits + const_bits(0, 8)   # 0x00||k||ser32(i)
+inner = compress(S_i, padded(data, 128 + 37))
+I = compress(S_o, padded(inner, 128 + 64))
+stop_timer(2)
+
+# ---- BIP32 child key: (I_L + k_par) mod n, verdict -----------------------
+start_timer(3)
+I_R, I_L = I[:256], I[256:]                           # I_L = high 256 bits
+S = add_bits(I_L, k_bits)                             # 257 bits
+ge = ge_const(S, N_SECP)
+D = add_bits(S, const_bits(2**257 - N_SECP, 257))[:256]   # S - n (if ge)
+k_child = [s ^ (ge & (s ^ d)) for s, d in zip(S[:256], D)]
+ge_il, zero = ge_const(I_L, N_SECP), is_zero(k_child)
+bad = ge_il ^ zero ^ (ge_il & zero)                   # OR
+stop_timer(3)
+
+print_ln("HMAC_BAD %s", bad.reveal())
+if REVEAL:
+    print_ln("HMAC_KCHILD %s", sbitvec.from_vec(k_child).elements()[0].reveal())
+    print_ln("HMAC_CCHILD %s", sbitvec.from_vec(I_R).elements()[0].reveal())
+print_ln("HMAC_END")

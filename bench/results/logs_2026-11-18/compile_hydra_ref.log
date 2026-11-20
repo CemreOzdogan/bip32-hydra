@@ -1,0 +1,14 @@
+Default bit length: 126
+Default security parameter: 40
+Compiling file Programs/my_Programs/hydra.mpc
+Compiling: for
+Prime = 170141183460469231731687303715884105773
+t = 8
+Using Squares = True
+Changed bit length for comparisons etc. to 128
+Writing to /mp-spdz/Programs/Schedules/hydra.sch
+Writing to /mp-spdz/Programs/Bytecode/hydra-0.bc
+Program requires:
+          24 integer squares
+         147 integer triples
+         131 virtual machine rounds

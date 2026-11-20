@@ -1,0 +1,38 @@
+# bitdec_check.mpc -- boundary test of MP-SPDZ's bit decomposition
+# (floatingpoint.BitDecFull, the routine poc_derive.mpc uses) at the thesis
+# prime p = 2^128 + 385.  Added 2026-11-14 for the review brief, issue 6.
+#
+# For each test value a it decomposes [a] into 129 shared bits with fresh
+# masks, then OPENS the bits (test only -- never done in poc_derive.mpc) and
+# prints them.  bitdec_check.py checks on the host that the bits are 0/1,
+# canonical (integer < p) and recompose to a.  Each fixed value is decomposed
+# REPS times with fresh masks: small a (< 2^128) make b + c >= p almost
+# always (wrap branch, q = 1), a >= 2^128 never do (q = 0), random a mixes.
+from Compiler import floatingpoint
+
+THESIS_PRIME = 2**128 + 385
+p = program.prime
+assert p == THESIS_PRIME
+program.set_bit_length(p.bit_length())   # 129, unchanged from the PoC
+program.use_square(True)
+program.name = "bitdec_check"
+
+REPS = 20
+N_RANDOM = 200
+FIXED = [0, 1, 2, 384, 385, 2**64, 2**127 - 1, 2**127, 2**128 - 1,
+         2**128, 2**128 + 1, p - 2, p - 1]
+
+def check(x, tag):
+    bits = floatingpoint.BitDecFull(x)
+    assert len(bits) == 129
+    print_str("BD %s %s ", tag, x.reveal())
+    for b in bits:
+        print_str("%s", b.reveal())
+    print_ln("")
+
+for j, v in enumerate(FIXED):
+    for r in range(REPS):
+        check(sint(v), "F%d" % j)
+for r in range(N_RANDOM):
+    check(sint.get_random(), "R")
+print_ln("BD_DONE")

@@ -1,0 +1,68 @@
+﻿== rerun_latency: 3 configurations, 15 runs
+  hmac-rtt1              rep  1: 11.0365 s, 15033 rounds, 0.937458 MB
+  hmac-rtt1              rep  2: 10.5183 s, 15033 rounds, 0.937458 MB
+  hmac-rtt1              rep  3: 10.7673 s, 15033 rounds, 0.937458 MB
+  hmac-rtt1              rep  4: 11.996 s, 15033 rounds, 0.937458 MB
+  hmac-rtt1              rep  5: 11.6137 s, 15033 rounds, 0.937458 MB
+  hmac-rtt5              rep  1: 47.508 s, 15033 rounds, 0.937458 MB
+  hmac-rtt5              rep  2: 48.2306 s, 15033 rounds, 0.937458 MB
+  hmac-rtt5              rep  3: 48.48 s, 15033 rounds, 0.937458 MB
+  hmac-rtt5              rep  4: 48.5817 s, 15033 rounds, 0.937458 MB
+  hmac-rtt5              rep  5: 48.0726 s, 15033 rounds, 0.937458 MB
+  hmac-rtt10             rep  1: 91.2729 s, 15033 rounds, 0.937458 MB
+  hmac-rtt10             rep  2: 92.092 s, 15033 rounds, 0.937458 MB
+  hmac-rtt10             rep  3: 91.8797 s, 15033 rounds, 0.937458 MB
+  hmac-rtt10             rep  4: 91.9792 s, 15033 rounds, 0.937458 MB
+  hmac-rtt10             rep  5: 92.7564 s, 15033 rounds, 0.937458 MB
+  BENCH_DONE
+
+rerun_latency: median over reps (p95 of time in brackets)
+config                          time s  PRF/HMAC  §7/pads      §8  rounds  MB/party   CPU s  RSS MB
+hmac-rtt1               11.037 [11.996]     5.344    5.335   0.363   15033      0.94    2.68    27.7
+hmac-rtt5               48.231 [48.582]    23.238   23.345   1.649   15033      0.94    8.38    27.7
+hmac-rtt10              91.979 [92.756]    44.451   44.344   3.140   15033      0.94   14.42    27.9
+columns: hydra = PRF | sec.7 overflow | sec.8 (incl. k_par bits); hmac = per-child HMAC | per-parent pads | add mod n
+== rerun_malshamir_latency: 4 configurations, 16 runs
+  hmac-mal-rtt1          rep  1: 11.4262 s, 15226 rounds, 53.4043 MB
+  hmac-mal-rtt1          rep  2: 11.3891 s, 15226 rounds, 53.4043 MB
+  hmac-mal-rtt1          rep  3: 11.3429 s, 15226 rounds, 53.4043 MB
+  hmac-mal-rtt1          rep  4: 11.4838 s, 15226 rounds, 53.4043 MB
+  hmac-mal-rtt1          rep  5: 11.2943 s, 15226 rounds, 53.4043 MB
+  hmac-mal-rtt5          rep  1: 47.9429 s, 15226 rounds, 53.4043 MB
+  hmac-mal-rtt5          rep  2: 49.2024 s, 15226 rounds, 53.4043 MB
+  hmac-mal-rtt5          rep  3: 49.2909 s, 15226 rounds, 53.4043 MB
+  hmac-mal-rtt5          rep  4: 49.7438 s, 15226 rounds, 53.4043 MB
+  hmac-mal-rtt5          rep  5: 49.6553 s, 15226 rounds, 53.4043 MB
+  hmac-mal-rtt10         rep  1: 94.9397 s, 15226 rounds, 53.4043 MB
+  hmac-mal-rtt10         rep  2: 95.5193 s, 15226 rounds, 53.4043 MB
+  hmac-mal-rtt10         rep  3: 91.3696 s, 15226 rounds, 53.4043 MB
+  hmac-mal-rtt10         rep  4: 88.9348 s, 15226 rounds, 53.4043 MB
+  hmac-mal-rtt10         rep  5: 89.0854 s, 15226 rounds, 53.4043 MB
+  hmac-mal-rtt25         rep  1: 211.419 s, 15226 rounds, 53.4043 MB
+  BENCH_DONE
+
+rerun_malshamir_latency: median over reps (p95 of time in brackets)
+config                          time s  PRF/HMAC  §7/pads      §8  rounds  MB/party   CPU s  RSS MB
+hmac-mal-rtt1           11.389 [11.484]     5.488    5.540   0.368   15226     53.40    2.84    32.4
+hmac-mal-rtt5           49.291 [49.744]    23.828   23.761   1.672   15226     53.40    8.73    32.3
+hmac-mal-rtt10          91.370 [95.519]    43.609   44.678   3.067   15226     53.40   12.87    32.4
+hmac-mal-rtt25         211.419 [211.419]   104.476   99.754   7.159   15226     53.40   17.90    32.4
+columns: hydra = PRF | sec.7 overflow | sec.8 (incl. k_par bits); hmac = per-child HMAC | per-parent pads | add mod n
+== rerun_mascot: 2 configurations, 10 runs
+  hmac-mascot-rtt1       rep  1: 25.3545 s, 31374 rounds, 509.576 MB
+  hmac-mascot-rtt1       rep  2: 25.6265 s, 31374 rounds, 509.576 MB
+  hmac-mascot-rtt1       rep  3: 25.394 s, 31374 rounds, 509.576 MB
+  hmac-mascot-rtt1       rep  4: 25.5899 s, 31374 rounds, 509.576 MB
+  hmac-mascot-rtt1       rep  5: 24.845 s, 31374 rounds, 509.576 MB
+  hmac-mascot-rtt10      rep  1: 174.945 s, 31374 rounds, 509.576 MB
+  hmac-mascot-rtt10      rep  2: 174.861 s, 31374 rounds, 509.576 MB
+  hmac-mascot-rtt10      rep  3: 174.975 s, 31374 rounds, 509.576 MB
+  hmac-mascot-rtt10      rep  4: 175.121 s, 31374 rounds, 509.576 MB
+  hmac-mascot-rtt10      rep  5: 173.621 s, 31374 rounds, 509.576 MB
+  BENCH_DONE
+
+rerun_mascot: median over reps (p95 of time in brackets)
+config                          time s  PRF/HMAC  §7/pads      §8  rounds  MB/party   CPU s  RSS MB
+hmac-mascot-rtt1        25.394 [25.627]    12.306   12.419   0.807   31374    509.58    2.83    77.5
+hmac-mascot-rtt10      174.945 [175.121]    84.477   84.596   5.744   31374    509.58    6.10    77.6
+columns: hydra = PRF | sec.7 overflow | sec.8 (incl. k_par bits); hmac = per-child HMAC | per-parent pads | add mod n
